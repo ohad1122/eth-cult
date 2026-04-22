@@ -3,8 +3,13 @@ const express = require("express");
 const cors = require("cors");
 const path = require("path");
 const fs = require("fs");
+const http = require("http");
+const { Server } = require("socket.io");
 
 const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
+
 const PORT = process.env.PORT || 3001;
 const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY || "CHY4ZYN8ZXJSJEP53AGJXJHY8V2A8UHNKN";
 const DB_FILE = path.join(__dirname, "members.json");
@@ -48,13 +53,12 @@ async function getWalletStats(address) {
     const eth = parseFloat(safeWeiToEth(balRes.result));
     const txCount = txRes.status === "1" && Array.isArray(txRes.result) ? txRes.result.length : 0;
 
-    // Cult rank based on ETH + activity
     let rank, rankColor;
-    if (eth >= 100) { rank = "🔱 ARCH ELDER"; rankColor = "#f59e0b"; }
-    else if (eth >= 10) { rank = "⛧ HIGH PRIEST"; rankColor = "#a855f7"; }
-    else if (eth >= 1) { rank = "🜂 CULTIST"; rankColor = "#6366f1"; }
-    else if (eth >= 0.1) { rank = "🕯 INITIATE"; rankColor = "#14b8a6"; }
-    else { rank = "👁 SEEKER"; rankColor = "#64748b"; }
+    if (eth >= 100)      { rank = "🔱 ARCH ELDER";  rankColor = "#f59e0b"; }
+    else if (eth >= 10)  { rank = "⛧ HIGH PRIEST";  rankColor = "#a855f7"; }
+    else if (eth >= 1)   { rank = "🜂 CULTIST";      rankColor = "#6366f1"; }
+    else if (eth >= 0.1) { rank = "🕯 INITIATE";     rankColor = "#14b8a6"; }
+    else                 { rank = "👁 SEEKER";        rankColor = "#64748b"; }
 
     return { eth, txCount, rank, rankColor };
   } catch {
@@ -99,7 +103,6 @@ app.post("/api/register", async (req, res) => {
 // Get all members
 app.get("/api/members", (req, res) => {
   const members = readDB();
-  // Sort by ETH desc
   const sorted = [...members].sort((a, b) => b.eth - a.eth);
   res.json({ members: sorted, total: members.length, totalEth: members.reduce((s, m) => s + m.eth, 0).toFixed(2) });
 });
@@ -116,4 +119,52 @@ app.get("/api/check/:wallet", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => console.log(`\n🔥 ETH CULT running at http://localhost:${PORT}\n`));
+// ── Socket.io Chat ────────────────────────────────
+const onlineUsers = new Map(); // socketId -> { name, rank, rankColor, wallet }
+
+io.on("connection", (socket) => {
+
+  // Join chat — verify wallet is a registered member
+  socket.on("chat:join", (wallet) => {
+    if (!wallet || !/^0x[0-9a-fA-F]{40}$/.test(wallet)) return;
+    const members = readDB();
+    const member = members.find(m => m.wallet.toLowerCase() === wallet.toLowerCase());
+    if (!member) {
+      socket.emit("chat:error", "You must be a registered cult member to chat.");
+      return;
+    }
+    onlineUsers.set(socket.id, { name: member.name, rank: member.rank, rankColor: member.rankColor, wallet: member.wallet });
+    socket.emit("chat:joined", { name: member.name, rank: member.rank, rankColor: member.rankColor });
+
+    // Broadcast join event
+    io.emit("chat:online", onlineUsers.size);
+    io.emit("chat:system", `${member.rank} ${member.name} has entered the cult.`);
+  });
+
+  // Message
+  socket.on("chat:message", (text) => {
+    const user = onlineUsers.get(socket.id);
+    if (!user) return;
+    const clean = String(text).trim().slice(0, 300);
+    if (!clean) return;
+    io.emit("chat:message", {
+      name: user.name,
+      rank: user.rank,
+      rankColor: user.rankColor,
+      text: clean,
+      ts: Date.now(),
+    });
+  });
+
+  // Disconnect
+  socket.on("disconnect", () => {
+    const user = onlineUsers.get(socket.id);
+    if (user) {
+      onlineUsers.delete(socket.id);
+      io.emit("chat:online", onlineUsers.size);
+      io.emit("chat:system", `${user.name} has left the cult.`);
+    }
+  });
+});
+
+server.listen(PORT, () => console.log(`\n🔥 ETH CULT running at http://localhost:${PORT}\n`));
